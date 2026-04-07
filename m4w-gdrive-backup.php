@@ -9,8 +9,9 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-require_once './google-drive-client.php';
-require_once './bckup-manager.php';
-require_once './cron.php';
-require_once './oauth.php';
-require_once './settings.php';
+$base = plugin_dir_path(__FILE__);
+require_once $base . 'google-drive-client.php';
+require_once $base . 'backup-manager.php';
+require_once $base . 'cron.php';
+require_once $base . 'oauth.php';
+require_once $base . 'settings.php';

@@ -581,13 +581,10 @@ class BackupToGoogleDriveManager {
 			$path = $gdrive_file['path'];
 
 			if ( $this->should_delete_gdrive_file( $path, $gdrive_paths ) ) {
-				$this->log_sync( 'info', 'Deleting GDrive file: ' . $path );
 				$files_to_delete[] = array(
 					'id'   => $gdrive_file['id'],
 					'path' => $path,
 				);
-			} else {
-				$this->log_sync( 'info', 'Keeping GDrive file: ' . $path );
 			}
 		}
 

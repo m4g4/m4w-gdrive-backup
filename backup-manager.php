@@ -92,6 +92,9 @@ class BackupToGoogleDriveManager {
 				$files[] = $item['relative_path'];
 			}
 			$this->log_sync( 'info', 'Starting queue sync with ' . count( $files ) . ' files' );
+
+			$files = $this->filter_should_keep( $files, array_flip( $files ) );
+			$this->log_sync( 'info', 'After filtering non-keep files: ' . count( $files ) . ' files' );
 		} else {
 			$this->log_sync( 'info', 'Starting full sync...' );
 
@@ -106,14 +109,8 @@ class BackupToGoogleDriveManager {
 
 			$this->log_sync( 'info', 'Found ' . count( $files ) . ' local files to process' );
 
-			$files = $this->filter_originals_only( $files );
-			$this->log_sync( 'info', 'After filtering non-original images: ' . count( $files ) . ' files' );
-
-			$files = $this->filter_excluded_patterns( $files );
-			$this->log_sync( 'info', 'After filtering excluded patterns: ' . count( $files ) . ' files' );
-
-			$files = $this->filter_resmush_duplicates( $files );
-			$this->log_sync( 'info', 'After filtering Resmush.it duplicates: ' . count( $files ) . ' files' );
+			$files = $this->filter_should_keep( $files, array_flip( $files ) );
+			$this->log_sync( 'info', 'After filtering non-keep files: ' . count( $files ) . ' files' );
 
 			$files_to_delete = $this->get_gdrive_files_to_delete();
 			if ( ! empty( $files_to_delete ) ) {
@@ -401,6 +398,11 @@ class BackupToGoogleDriveManager {
 	private function sync_directory( $gdrive, $base_path, $current_path, $relative_path, $folder_id, &$stats ) {
 		$items = scandir( $current_path );
 
+		$paths = array();
+		foreach ( $items as $item ) {
+			$paths[ $item ] = true;
+		}
+
 		foreach ( $items as $item ) {
 			if ( $item === '.' || $item === '..' ) {
 				continue;
@@ -410,7 +412,14 @@ class BackupToGoogleDriveManager {
 			$item_relative = $relative_path ? trailingslashit( $relative_path ) . $item : $item;
 
 			if ( is_dir( $item_path ) ) {
+				if ( $this->should_skip_path( $item_relative ) ) {
+					continue;
+				}
 				$this->sync_directory( $gdrive, $base_path, $item_path, $item_relative, $folder_id, $stats );
+				continue;
+			}
+
+			if ( ! $this->should_keep_file( $item_path, $paths ) ) {
 				continue;
 			}
 
@@ -454,6 +463,9 @@ class BackupToGoogleDriveManager {
 			$item_relative = $relative_path ? trailingslashit( $relative_path ) . $item : $item;
 
 			if ( is_dir( $item_path ) ) {
+				if ( $this->should_skip_path( $item_relative ) ) {
+					continue;
+				}
 				$files = array_merge( $files, $this->collect_files( $base_path, $item_path, $item_relative ) );
 				continue;
 			}
@@ -508,8 +520,15 @@ class BackupToGoogleDriveManager {
 			return true;
 		}
 
-		$size_pattern = '/-\d+x\d+(?:@2x)?\.' . preg_quote( $ext, '/' ) . '$/i';
+		$escaped_ext = preg_quote( $ext, '/' );
+
+		$size_pattern = '/-\d+x\d+(?:\@2x)?\.' . $escaped_ext . '$/i';
 		if ( preg_match( $size_pattern, $filename ) ) {
+			return false;
+		}
+
+		$retina_pattern = '/-\d+x\d+\@2x\.' . $escaped_ext . '$/i';
+		if ( preg_match( $retina_pattern, $filename ) ) {
 			return false;
 		}
 
@@ -520,35 +539,18 @@ class BackupToGoogleDriveManager {
 
 		foreach ( $intermediate_sizes as $size ) {
 			$size = preg_quote( $size, '/' );
-			$named_size_pattern = '/-' . $size . '(?:-\d+x\d+)?\.' . preg_quote( $ext, '/' ) . '$/i';
+			$named_size_pattern = '/-' . $size . '(?:-\d+x\d+)?\.' . $escaped_ext . '$/i';
 			if ( preg_match( $named_size_pattern, $filename ) ) {
 				return false;
 			}
 		}
-
+	
 		return true;
 	}
 
-	public function filter_originals_only( $files ) {
-		return array_filter( $files, function( $file_path ) {
-			$absolute_path = ABSPATH . $file_path;
-			return $this->is_original_image( $absolute_path );
-		} );
-	}
-
-	private function filter_excluded_patterns( $files ) {
-		$patterns = $this->get_exclude_patterns();
-		if ( empty( $patterns ) ) {
-			return $files;
-		}
-
-		return array_filter( $files, function( $file_path ) use ( $patterns ) {
-			foreach ( $patterns as $pattern ) {
-				if ( @preg_match( $pattern, $file_path ) ) {
-					return false;
-				}
-			}
-			return true;
+	public function filter_should_keep( $files, $all_files ) {
+		return array_filter( $files, function( $file_path ) use ( $all_files ) {
+			return $this->should_keep_file( $file_path, $all_files );
 		} );
 	}
 
@@ -579,10 +581,13 @@ class BackupToGoogleDriveManager {
 			$path = $gdrive_file['path'];
 
 			if ( $this->should_delete_gdrive_file( $path, $gdrive_paths ) ) {
+				$this->log_sync( 'info', 'Deleting GDrive file: ' . $path );
 				$files_to_delete[] = array(
 					'id'   => $gdrive_file['id'],
 					'path' => $path,
 				);
+			} else {
+				$this->log_sync( 'info', 'Keeping GDrive file: ' . $path );
 			}
 		}
 
@@ -590,40 +595,41 @@ class BackupToGoogleDriveManager {
 	}
 
 	private function should_delete_gdrive_file( $path, $gdrive_paths) {
+		return ! $this->should_keep_file( $path, $gdrive_paths );
+	}
+
+	private function should_skip_path( $relative_path ) {
 		$patterns = $this->get_exclude_patterns();
-		if ( ! empty( $patterns ) ) {
-			foreach ( $patterns as $pattern ) {
-				if ( @preg_match( $pattern, $path ) ) {
-					return true;
-				}
+		if ( empty( $patterns ) ) {
+			return false;
+		}
+
+		foreach ( $patterns as $pattern ) {
+			if ( @preg_match( $pattern, $relative_path ) ) {
+				return true;
 			}
 		}
+		return false;
+	}
 
-		// Remove non-original image variants from GDrive.
+	public function should_keep_file( $path, $paths ) {
+		if ( $this->should_skip_path( $path ) ) {
+			return false;
+		}
+
 		if ( ! $this->is_original_image( $path ) ) {
-			return true;
+			return false;
 		}
 
-		return $this->is_resmush_duplicate( $path, $gdrive_paths, true );
-	}
-
-	private function filter_resmush_duplicates( $files ) {
 		$avoid_resmush = isset( $this->options['avoid_resmush_duplicates'] ) && $this->options['avoid_resmush_duplicates'] === '1';
-		if ( ! $avoid_resmush ) {
-			return $files;
+		if ( $avoid_resmush && $this->is_resmush_duplicate( $path, $paths ) ) {
+			return false;
 		}
 
-		$files_lookup = array();
-		foreach ( $files as $file ) {
-			$files_lookup[ $file ] = true;
-		}
-
-		return array_filter( $files, function( $file ) use ( $files_lookup ) {
-			return ! $this->is_resmush_duplicate( $file, $files_lookup );
-		} );
+		return true;
 	}
 
-	private function is_resmush_duplicate( $file_path, $all_files = array(), $verbose = false ) {
+	private function is_resmush_duplicate( $file_path, $all_files) {
 		$info = pathinfo( $file_path );
 		$ext = isset( $info['extension'] ) ? strtolower( $info['extension'] ) : '';
 
@@ -640,10 +646,6 @@ class BackupToGoogleDriveManager {
 		}
 
 		$potential_unsmushed = $dirname . $filename . '-unsmushed.' . $ext;
-
-		if ( $verbose ) {
-			$this->log_sync( 'info', 'Debug unsmushed: ' . $potential_unsmushed . ', isset: ' . ( isset( $all_files[ $potential_unsmushed ] ) ? 'true' : 'false' ) );
-		}
 
 		return isset( $all_files[ $potential_unsmushed ] );
 	}
